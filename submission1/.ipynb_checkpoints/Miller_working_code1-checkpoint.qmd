@@ -1,0 +1,210 @@
+---
+title: Homework 5 submission 1
+format: 
+    pdf: 
+      echo: false
+      warning: false
+      message: false
+---
+
+```{r}
+library(tidyverse)
+library(broom)
+library(fixest)
+final_analysis_data <- read_csv("../data/final_analysis_data.csv")
+```
+
+# Question 1
+Provide a table of mean hospital uncompensated care (in millions of dollars) by year, from 2010 through 2018. How has uncompensated care changed over time?
+
+
+```{r}
+uncomp_summary_table <- final_analysis_data %>%
+  filter(year >= 2010 & year <= 2018) %>%
+  group_by(year) %>%
+  summarize(
+    mean_uncomp_millions = mean(uncomp_millions, na.rm = TRUE)
+  ) %>%
+  arrange(year)
+
+uncomp_summary_table
+```
+
+Uncompensated care has decreased a bit over time. It started at 9.79 million in 2010 and reached 4.96 million in 2018, between 2014 and 2018 uncompensated care decreased and increased a bit but mainly stayed in the range of 4-5 million
+
+# Question 2
+Plot mean uncompensated care over time separately for states that expanded Medicaid in 2014 versus states that never expanded. Drop all states that expanded after 2014. Does the graph suggest a potential treatment effect?
+
+```{r}
+# Filter and Define Groups
+plot_data <- final_analysis_data %>%
+  filter((expand_ever == TRUE & expansion_year == 2014) | (expand_ever == FALSE)) %>%
+  mutate(group = ifelse(expand_ever, "Expanded in 2014", "Never Expanded"))
+
+# Calculate means by year and group
+plot_summary <- plot_data %>%
+  group_by(year, group) %>%
+  summarize(mean_uncomp = mean(uncomp_millions, na.rm = TRUE), .groups = "drop")
+
+# Create plot
+ggplot(plot_summary, aes(x = year, y = mean_uncomp, color = group, group = group)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 2013.5, linetype = "dashed", color = "grey40") +
+  annotate("text", x = 2012, y = max(plot_summary$mean_uncomp), label = "Pre-Expansion", color = "grey40") +
+  annotate("text", x = 2015, y = max(plot_summary$mean_uncomp), label = "Post-Expansion", color = "grey40") +
+  scale_x_continuous(breaks = 2010:2018) +
+  theme_minimal() +
+  labs(
+    title = "Impact of 2014 Medicaid Expansion on Uncompensated Care",
+    x = "Year",
+    y = "Mean Uncompensated Care ($ Millions)",
+    color = "State Group"
+  ) +
+  theme(legend.position = "bottom")
+```
+
+This graph strongly suggests a potential treatment effect. Prior to 2014 both states that did and did not expand follow paralell trends. After 2014 these two lines clearly diverge, suggesting a treatment effect.
+
+# Question 3
+Using 2012 and 2015 as your pre and post periods, present a 2x2 DD table of mean uncompensated care for expansion versus non-expansion states (again focusing only on 2014 expanders and never-expanders).
+
+```{r}
+# Filter and set up  DD groups
+dd_data <- final_analysis_data %>%
+  filter(year %in% c(2012, 2015)) %>%
+  filter((expand_ever == TRUE & expansion_year == 2014) | (expand_ever == FALSE)) %>%
+  mutate(
+    group = ifelse(expand_ever, "2014 Expanders (Treatment)", "Never Expanded (Control)"),
+    period = ifelse(year == 2012, "Pre (2012)", "Post (2015)")
+  )
+
+# Calculate means
+dd_table <- dd_data %>%
+  group_by(group, period) %>%
+  summarize(mean_uncomp = mean(uncomp_millions, na.rm = TRUE), .groups = "drop") %>%
+  # Pivot into a 2x2 format
+  pivot_wider(names_from = period, values_from = mean_uncomp)
+
+# Adding differences
+dd_table_final <- dd_table %>%
+  mutate(Difference = `Post (2015)` - `Pre (2012)`)
+
+# Display the table
+dd_table_final
+```
+
+# Question 4
+Briefly discuss what policies or events might explain the trends you observe. Why might we expect Medicaid expansion to affect uncompensated care?
+
+The Affordable Care Act is likely the biggest driver of this, as it was launched in 2010, but the coverage provisions didn't start until 2014. 
+The Supreme Court ruling in 2012 is also another contributor, which ruled that not every state had to expand Medicaid and that's why we see some states not expanding.
+
+# Question 5
+Estimate the effect of Medicaid expansion on hospital uncompensated care using a standard DD regression estimator, focusing only on states that expanded in 2014 versus those that never expanded.
+
+```{r}
+# Prepare data
+reg_data <- final_analysis_data %>%
+  filter((expand_ever == TRUE & expansion_year == 2014) | (expand_ever == FALSE)) %>%
+  mutate(
+    post = ifelse(year >= 2014, 1, 0),
+    treat = ifelse(expand_ever == TRUE, 1, 0)
+  )
+
+# Estimate Standard DD Regression
+dd_reg <- lm(uncomp_millions ~ treat + post + treat:post, data = reg_data)
+
+summary(dd_reg)
+```
+
+# Question 6
+Include hospital and year fixed effects in your estimates using the fixest package. Cluster your standard errors at the state level. How do your results compare to those in question 5?
+
+```{r}
+# Filter the data
+reg_data_fe <- final_analysis_data %>%
+  filter((expand_ever == TRUE & expansion_year == 2014) | (expand_ever == FALSE))
+
+# Estimate the Model
+fe_model <- feols(uncomp_millions ~ expand | provider_number + year, 
+                  cluster = ~state, 
+                  data = reg_data_fe)
+
+summary(fe_model)
+```
+
+Medicaid expansion seems to cause a significant drop in uncompensated care
+
+# Question 7
+Repeat the analysis in question 6 but include all states (even those that expanded after 2014). Are your results different? If so, why?
+
+```{r}
+# Estimate the model using all states
+fe_model_all <- feols(uncomp_millions ~ expand | provider_number + year, 
+                      cluster = ~state, 
+                      data = final_analysis_data)
+
+summary(fe_model_all)
+```
+
+These results are different in what the show. Results from 6 show how the change occurred over time, while results from 7 show how much of a change has occurred. 
+
+# Question 8
+Provide an “event study” graph showing the effects of Medicaid expansion in each year. Use the specification that includes hospital and year fixed effects, limited to states that expanded in 2014 or never expanded (with 2013 as the reference year).
+
+
+```{r}
+# Filter  data
+event_data <- final_analysis_data %>%
+  filter((expand_ever == TRUE & expansion_year == 2014) | (expand_ever == FALSE))
+
+# Run the event study regression
+event_study_model <- feols(uncomp_millions ~ i(year, expand_ever, ref = 2013) | 
+                             provider_number + year, 
+                           cluster = ~state, 
+                           data = event_data)
+
+# Plot 
+iplot(event_study_model, 
+      main = "Event Study: Effect of 2014 Medicaid Expansion",
+      xlab = "Year",
+      ylab = "Estimate (Millions $)",
+      sep = 0.5)
+```
+
+# Question 9
+Repeat part 8 but include all states that expanded after 2014. You will need to construct an “event time” variable and bin end points as discussed in class.
+
+```{r}
+# Event Time variable
+event_study_data <- final_analysis_data %>%
+  mutate(
+    event_time = year - expansion_year,
+    event_time = ifelse(is.na(event_time), -1, event_time),
+    event_time_binned = case_when(
+      event_time <= -5 ~ -5,
+      event_time >= 5 ~ 5,
+      TRUE ~ event_time
+    )
+  )
+
+# Run fixed effects model
+staggered_model <- feols(uncomp_millions ~ i(event_time_binned, ref = -1) | 
+                           provider_number + year, 
+                         cluster = ~state, 
+                         data = event_study_data)
+
+# Plot
+iplot(staggered_model, 
+      main = "Staggered Event Study: Medicaid Expansion Impact",
+      xlab = "Years Relative to Expansion (0 = Year of Expansion)",
+      ylab = "Effect on Uncomp Care ($ Millions)",
+      grid = TRUE)
+```
+
+# Question 10
+Summarize your findings from questions 5-9. What is the effect of Medicaid expansion on hospital uncompensated care? Do the event study graphs suggest any concerns about the parallel trends assumption? Briefly discuss one limitation of the standard TWFE estimator in the context of staggered Medicaid expansion.
+
+these results show that Medicaid expansion reduced hospitals uncompensated care costs. These results don't suggest significant concerns regarding the parallel trends assumption because in the estimates for the years before the expansion are close to the zero line. One limitation would be negative weighting, in this comparison states that expanded early could become controls for states taht expanded later. 
+

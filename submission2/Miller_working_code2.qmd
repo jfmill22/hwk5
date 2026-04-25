@@ -1,0 +1,262 @@
+---
+title: Homework 5 submission 2
+format: 
+    pdf: 
+      echo: false
+      warning: false
+      message: false
+---
+
+```{r}
+library(tidyverse)
+library(broom)
+library(fixest)
+library(lubridate)
+final_analysis_data <- read_csv("../data/Final_HCRIS_KFF.csv")
+
+```
+
+# Question 1
+Provide a table of mean hospital uncompensated care (in millions of dollars) by year, from 2010 through 2018. How has uncompensated care changed over time?
+
+
+```{r}
+uncomp_summary <- final_analysis_data %>%
+  filter(fyear >= 2010 & fyear <= 2018) %>%
+  group_by(fyear) %>%
+  summarize(
+    mean_uncomp = mean(uncomp_care, na.rm = TRUE) / 1e6,
+    hospital_count = n()
+  )
+
+uncomp_summary
+```
+
+Uncompensated care seems to change every year. In 2011 it started at 34 million and then in 2018 it reached 38 million. From 2011 to 2013 it increased, there was also a peak in 2016 at 44.5 million, where it then decreases again in 2017 at 40.5 million and 2018. 
+
+# Question 2
+Plot mean uncompensated care over time separately for states that expanded Medicaid in 2014 versus states that never expanded. Drop all states that expanded after 2014. Does the graph suggest a potential treatment effect?
+
+```{r}
+plot_data <- final_analysis_data %>%
+  filter(fyear >= 2010 & fyear <= 2018) %>%  
+  mutate(exp_year = year(mdy(`Expansion Implementation Date`))) %>%  
+  mutate(group = case_when(
+    exp_year == 2014 ~ "Expanded 2014",    
+    `Status of Medicaid Expansion Decision` == "Not Adopted" ~ "Never Expanded",    
+    TRUE ~ "Drop"
+  )) %>%  
+  filter(group != "Drop") %>%  
+  group_by(fyear, group) %>%
+  summarize(mean_uncomp = mean(uncomp_care, na.rm = TRUE) / 1e6, .groups = 'drop')
+
+# Graph
+ggplot(plot_data, aes(x = fyear, y = mean_uncomp, color = group, group = group)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 2013.5, linetype = "dashed", color = "gray30") +
+  annotate("text", x = 2013.7, y = max(plot_data$mean_uncomp), 
+           label = "2014 Expansion", color = "gray30", hjust = 0) +
+  labs(
+    title = "Impact of 2014 Medicaid Expansion on Uncompensated Care",
+    x = "Year",
+    y = "Mean Uncompensated Care ($ Millions)",
+    color = "Status"
+  ) +
+  theme_minimal()
+```
+
+This graph strongly suggests a potential treatment effect. Prior to 2014 both states that did and did not expand follow paralell trends. After 2014 these two lines clearly diverge, suggesting a treatment effect.
+
+# Question 3
+Using 2012 and 2015 as your pre and post periods, present a 2x2 DD table of mean uncompensated care for expansion versus non-expansion states (again focusing only on 2014 expanders and never-expanders).
+
+```{r}
+# Filter and categorize the data for the 2x2 table
+dd_table_data <- final_analysis_data %>%
+  filter(fyear %in% c(2012, 2015)) %>%  
+  mutate(
+    exp_year = year(mdy(`Expansion Implementation Date`)),
+    group = case_when(
+      exp_year == 2014 ~ "Expanded 2014",
+      `Status of Medicaid Expansion Decision` == "Not Adopted" ~ "Never Expanded",
+      TRUE ~ "Drop"
+    )
+  ) %>%
+  filter(group != "Drop") %>%  
+  group_by(group, fyear) %>%
+  summarize(mean_uncomp = mean(uncomp_care, na.rm = TRUE) / 1e6, .groups = 'drop')
+
+# 2x2 Table format
+dd_matrix <- dd_table_data %>%
+  pivot_wider(names_from = fyear, values_from = mean_uncomp, names_prefix = "Year_") %>%
+  rename(Group = group, Pre_2012 = Year_2012, Post_2015 = Year_2015)
+
+# Calculate Differences
+dd_final <- dd_matrix %>%
+  mutate(
+    Difference = Post_2015 - Pre_2012
+  )
+
+ dd_final
+```
+
+# Question 4
+Briefly discuss what policies or events might explain the trends you observe. Why might we expect Medicaid expansion to affect uncompensated care?
+
+The Affordable Care Act is likely the biggest driver of this, as it was launched in 2010, but the coverage provisions didn't start until 2014. 
+The Supreme Court ruling in 2012 is also another contributor, which ruled that not every state had to expand Medicaid and that's why we see some states not expanding.
+
+# Question 5
+Estimate the effect of Medicaid expansion on hospital uncompensated care using a standard DD regression estimator, focusing only on states that expanded in 2014 versus those that never expanded.
+
+```{r}
+reg_data <- final_analysis_data %>%
+  mutate(
+    exp_year = year(mdy(`Expansion Implementation Date`)),
+    treated = case_when(
+      exp_year == 2014 ~ 1,
+      `Status of Medicaid Expansion Decision` == "Not Adopted" ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(treated)) %>%  
+  mutate(post = ifelse(fyear >= 2014, 1, 0)) %>%  
+  mutate(uncomp_millions = uncomp_care / 1e6)
+
+# Standard OLS DD Regression
+dd_model <- lm(uncomp_millions ~ treated * post, data = reg_data)
+
+summary(dd_model)
+```
+
+# Question 6
+Include hospital and year fixed effects in your estimates using the fixest package. Cluster your standard errors at the state level. How do your results compare to those in question 5?
+
+```{r}
+reg_data_fe <- final_analysis_data %>%
+  mutate(
+    exp_year = year(mdy(`Expansion Implementation Date`)),
+    treated = case_when(
+      exp_year == 2014 ~ 1,
+      `Status of Medicaid Expansion Decision` == "Not Adopted" ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(treated)) %>%
+  mutate(
+    post = ifelse(fyear >= 2014, 1, 0),
+    treat_post = treated * post,
+    uncomp_millions = uncomp_care / 1e6
+  )
+
+# Run the Fixed Effects Regression
+fe_model <- feols(uncomp_millions ~ treat_post | provider_number + fyear, 
+                  data = reg_data_fe, 
+                  cluster = ~state_name)
+
+summary(fe_model)
+```
+
+The treatment effect is significant in both of these models, but question 6 provides a more accurate estimate and explains about 85% of the variation in data compared to only 3% in question 5. Question 6 is more robust through its utilization of fixed effects and clustered standard errors. 
+
+# Question 7
+Repeat the analysis in question 6 but include all states (even those that expanded after 2014). Are your results different? If so, why?
+
+```{r}
+full_reg_data <- final_analysis_data %>%
+  mutate(exp_year = year(mdy(`Expansion Implementation Date`))) %>%
+  mutate(
+    is_expanded = ifelse(!is.na(exp_year) & fyear >= exp_year, 1, 0),
+    uncomp_millions = uncomp_care / 1e6
+  )
+
+# Run Two-Way Fixed Effects Regression
+staggered_model <- feols(uncomp_millions ~ is_expanded | provider_number + fyear, 
+                         data = full_reg_data, 
+                         cluster = ~state_name)
+
+summary(staggered_model)
+```
+
+The results in question 7 shows a smaller treatment effect than what is shown in question 6. This is because it includes a noisier sample with significantly more providers. The models explanatory power also decreased from 85% to 29%.
+
+# Question 8
+Provide an “event study” graph showing the effects of Medicaid expansion in each year. Use the specification that includes hospital and year fixed effects, limited to states that expanded in 2014 or never expanded (with 2013 as the reference year).
+
+
+```{r}
+event_study_data <- final_analysis_data %>%
+  filter(fyear >= 2010 & fyear <= 2018) %>%
+  mutate(
+    exp_year = year(mdy(`Expansion Implementation Date`)),
+    treated = case_when(
+      exp_year == 2014 ~ 1,
+      `Status of Medicaid Expansion Decision` == "Not Adopted" ~ 0,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(treated)) %>%
+  mutate(uncomp_millions = uncomp_care / 1e6)
+
+# Estimate  Event Study Model
+es_model <- feols(uncomp_millions ~ i(fyear, treated, ref = 2013) | provider_number + fyear,
+                  data = event_study_data,
+                  cluster = ~state_name)
+
+# Plot
+iplot(es_model, 
+      main = "Event Study: Effect of 2014 Medicaid Expansion",
+      xlab = "Fiscal Year",
+      ylab = "Effect on Uncompensated Care ($ Millions)",
+      grid = TRUE)
+
+abline(h = 0, col = "black", lty = 2)
+abline(v = 4.5, col = "red", lty = 3) 
+```
+
+# Question 9
+Repeat part 8 but include all states that expanded after 2014. You will need to construct an “event time” variable and bin end points as discussed in class.
+
+```{r}
+q8_data <- final_analysis_data %>%
+  filter(fyear >= 2011 & fyear <= 2018) %>%  
+  mutate(
+    exp_year = year(mdy(`Expansion Implementation Date`)),
+    treated = case_when(
+      exp_year == 2014 ~ 1,
+      `Status of Medicaid Expansion Decision` == "Not Adopted" ~ 0,
+      TRUE ~ NA_real_ 
+    ),    
+    uncomp_millions = (coalesce(tot_uncomp_care_charges, 0) - 
+                       coalesce(tot_uncomp_care_partial_pmts, 0) + 
+                       coalesce(bad_debt, 0)) / 1e6
+  ) %>%
+  filter(!is.na(treated))
+
+# Fixed Effects Regression
+q8_model <- feols(uncomp_millions ~ i(fyear, treated, ref = 2013) | 
+                    provider_number + fyear, 
+                  data = q8_data, 
+                  cluster = ~state_name)
+
+# Plot 
+iplot(q8_model,
+      main = "Event Study: Effect of 2014 Medicaid Expansion",
+      xlab = "Fiscal Year",
+      ylab = "Effect on Uncompensated Care ($ Millions)",
+      pt.join = FALSE,  
+      grid = TRUE,
+      col = "black", 
+      pch = 19,
+      ref.line = FALSE)
+
+abline(h = 0, col = "black", lwd = 1)
+abline(v = 2013.5, col = "black", lty = 2)
+```
+
+# Question 10
+Summarize your findings from questions 5-9. What is the effect of Medicaid expansion on hospital uncompensated care? Do the event study graphs suggest any concerns about the parallel trends assumption? Briefly discuss one limitation of the standard TWFE estimator in the context of staggered Medicaid expansion.
+
+Medicaid expansion significantly reduced hospitals' uncompensated care, which is supported by event study graphs which confirm the parallel trends assumption with stable pre-treatment estimates. The results show a causal effect that increases over the years, showing a successful implementation of this policy. Despite these results, standard TWFE estimators may be biased in this staggered setting because early-adopting states can act as bad controls for later adopters when treatment effects vary over time.
+
